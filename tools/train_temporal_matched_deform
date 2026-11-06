@@ -1,0 +1,685 @@
+#!/usr/bin/env python
+"""Joint CVCI2 gate12 x0 fine-tuning with frozen rolling IRWM and same-time future conditions."""
+import argparse
+import contextlib
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import random
+import sys
+import time
+
+import numpy as np
+import torch
+import torch.distributed as dist
+from torch.cuda.amp import autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from data_paths import DEFAULT_DATA_ROOT
+from temporal_dataset import TemporalNuScenesDataset, temporal_collate, to_device
+from temporal_sampler import SceneStreamBatchSampler
+from planning_runtime import DEFAULT_BASE, DEFAULT_WORLD, DEFAULT_WORLD_ROOT, file_sha256, source_fingerprints, synchronize_base_buffers, planning_model_metadata
+from matched_diffusion import DEFAULT_FUSION_CONFIG
+from training_optimization import optimizer_groups, configure_training, restore_fused_optimizer_devices, verify_restored_state, LOSS_DIAGNOSTIC_KEYS, loss_diagnostic_keys
+from training_optimization import ControlUpdateMonitor, diagnostic_values, regularization_monitor, regularization_snapshot
+from temporal_matched_deform_model import (MatchedDeformTemporalModel as JointGate12TemporalModel,
+    MATCHED_DEFORM_FORMAT as JOINT_FORMAT, MATCHED_DEFORM_VERSION as ARCHITECTURE_VERSION,
+    MATCHED_DEFORM_INITIALIZATION as INITIALIZATION_PROFILE, MATCHED_DEFORM_SCOPE as TRAINING_SCOPE,
+    load_matched_deform_state as load_joint_state, matched_deform_state_dict as joint_state_dict)
+from world_models.matched_prior_monitor import gradient_monitor, write_monitor
+from world_models.rolling_state import TRAJECTORY_TRANSFORM_VERSION
+from motion_gate import DEFAULT_MOTION_GATE_CONFIG, MOTION_GATE_FORMAT, MOTION_GATE_VERSION, warm_start_v6, INTEGRATED_MOTION_GATE_CONFIG, INTEGRATED_MOTION_FORMAT
+from integrated_checkpoint import warm_start_integrated
+from fresh_v8_initialization import audit_fresh_v8, FRESH_V8_PROFILE, state_digest
+from world_models.adaptive_sampler import ADAPTIVE_SAMPLER_CONFIG
+
+
+def arguments():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-root', default=DEFAULT_DATA_ROOT,
+                        help='nuScenes data root (default: %(default)s)')
+    parser.add_argument('--base-checkpoint', default=str(DEFAULT_BASE))
+    parser.add_argument('--world-checkpoint', default=str(DEFAULT_WORLD))
+    parser.add_argument('--world-root', default=str(DEFAULT_WORLD_ROOT))
+    parser.add_argument('--work-dir', required=True)
+    parser.add_argument('--bev-encoder', choices=['transfuser', 'geobev'], default='transfuser')
+    parser.add_argument('--geobev-checkpoint', default=str(DEFAULT_BASE.parent/'geobev-r50-nuimage-cbgs.pth'))
+    parser.add_argument('--depth-loss-weight', type=float, default=.1)
+    parser.add_argument('--calibrate-position-loss', type=int, default=0, help='8..16 training batches, then exit without optimizer updates')
+    parser.add_argument('--plan-a', action='store_true')
+    parser.add_argument('--position-loss-weight', type=float, default=0.)
+    parser.add_argument('--position-gradient-every', type=int, default=0,
+                        help='planner-only loss gradient probe at this optimizer-update interval; 0 disables')
+    parser.add_argument('--position-target-ratio', type=float, default=.2,
+                        help='reference norm(weighted position gradient) / norm(x0 gradient); no automatic reweighting')
+    parser.add_argument('--candidate-mode', choices=['legacy','dynamic','current','full'], default='legacy')
+    parser.add_argument('--warm-start-geobev', help='V9 model weights only; fresh optimizer, scheduler and stream')
+    parser.add_argument('--batch-size', type=int, default=6)
+    parser.add_argument('--grad-accum', type=int, default=1)
+    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--precision', choices=['fp32','bf16'], default='bf16')
+    parser.add_argument('--steps-per-epoch', type=int, default=0, help='0: nominal full-data epoch')
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--optimizer-profile', choices=['legacy','differential'], default='legacy')
+    parser.add_argument('--image-lr', type=float)
+    parser.add_argument('--pretrained-lr', type=float)
+    parser.add_argument('--planner-lr', type=float)
+    parser.add_argument('--future-lr', type=float)
+    parser.add_argument('--offset-lr', type=float)
+    parser.add_argument('--gate-lr', type=float)
+    parser.add_argument('--distance-lr', type=float)
+    parser.add_argument('--current-point-lr', type=float)
+    parser.add_argument('--new-weight-decay', type=float,
+                        help='opt in to explicit decay/no_decay groups and this WD for new matrices')
+    parser.add_argument('--x0-layer-weights', type=float, nargs='+',
+                        help='positive weights, normalized to sum one; default: equal twelve-layer loss')
+    parser.add_argument('--geobev-color-probability', type=float, default=0.)
+    parser.add_argument('--geobev-color-strength', type=float, default=.1)
+    parser.add_argument('--t99-fraction', type=float, default=0.)
+    parser.add_argument('--train-cold-start-planning', action='store_true',
+                        help='supervise valid future labels also when three-frame history is unavailable')
+    parser.add_argument('--auxiliary-weights', type=float, nargs=3, default=[.2,.2,.1])
+    parser.add_argument('--world-readout-steps', type=int, choices=[5,6], default=6)
+    parser.add_argument('--loss-diagnostics', action='store_true')
+    parser.add_argument('--future-dropout', type=float, default=0.1)
+    parser.add_argument('--ddim-steps', type=int, default=1)
+    parser.add_argument('--warmup-steps', type=int, default=500)
+    parser.add_argument('--weight-decay', type=float, default=1e-4)
+    parser.add_argument('--seed', type=int, default=2026)
+    parser.add_argument('--log-every', type=int, default=25)
+    parser.add_argument('--points-per-map', type=int, nargs=5, default=[36,25,16,9,1])
+    parser.add_argument('--window-m', type=float, nargs=2, default=[6.,3.])
+    parser.add_argument('--offset-mode', choices=['learned','fixed'], default='learned')
+    parser.add_argument('--monitor-every', type=int, default=100,
+                        help='0 disables diagnostics; otherwise monitor at optimizer boundaries')
+    parser.add_argument('--resume')
+    parser.add_argument('--warm-start', help='v6 weights only; fresh optimizer/scheduler/history')
+    parser.add_argument('--fresh-res', action='store_true', help='Original CVCI2/IRWM pretraining and newly initialized V8 Res modules')
+    parser.add_argument('--motion-state-gate', action='store_true')
+    parser.add_argument('--integrated-motion-gate', action='store_true')
+    parser.add_argument('--adaptive-sampling', action='store_true')
+    parser.add_argument('--tune-world', action='store_true')
+    parser.add_argument('--world-tuning-scope', choices=['partial','full'], default='partial')
+    parser.add_argument('--no-world-checkpoint', action='store_true')
+    parser.add_argument('--world-lr', type=float, default=1e-6)
+    parser.add_argument('--tensorboard-dir', help='default: <work-dir>/tensorboard (rank 0 only)')
+    parser.add_argument('--verify-ddp', action='store_true',
+                        help='verify complete DiT/future state agreement across ranks at checkpoints')
+    parser.add_argument('--stop-after-epoch', type=int, default=0,
+                        help='stop after this checkpoint boundary without changing the LR budget')
+    return parser.parse_args()
+
+
+def rng_state():
+    return {'torch': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state(),
+            'numpy': np.random.get_state(), 'python': random.getstate()}
+
+
+def restore_rng(state):
+    torch.set_rng_state(state['torch'])
+    torch.cuda.set_rng_state(state['cuda'])
+    np.random.set_state(state['numpy'])
+    random.setstate(state['python'])
+
+
+def atomic_save(state, path):
+    temporary = str(path) + '.tmp'
+    torch.save(state, temporary)
+    os.replace(temporary, path)
+
+
+def main():
+    args = arguments()
+    if args.resume and args.warm_start:
+        raise ValueError('resume and warm-start are mutually exclusive')
+    if args.warm_start_geobev and (args.resume or args.warm_start or args.fresh_res or args.bev_encoder != 'geobev'):
+        raise ValueError('V9 warm start needs GeoBEV and a fresh optimizer, without resume/fresh-res')
+    if args.candidate_mode != 'legacy' and args.bev_encoder != 'geobev':
+        raise ValueError('Candidate interaction requires GeoBEV')
+    if args.fresh_res and (args.warm_start or not args.integrated_motion_gate or not args.adaptive_sampling or not args.tune_world):
+        raise ValueError('Fresh Res arm requires original pretraining, integrated motion, adaptive sampling and partial world tuning')
+    if args.integrated_motion_gate and args.motion_state_gate: raise ValueError('Select one motion injection')
+    if (args.adaptive_sampling or args.tune_world) and not args.integrated_motion_gate: raise ValueError('v8 options need integrated motion')
+    if args.adaptive_sampling and (args.points_per_map != ADAPTIVE_SAMPLER_CONFIG['points_per_map'] or args.window_m != [6.,3.] or args.offset_mode != 'learned'): raise ValueError('Adaptive CLI and sampler contract differ')
+    if args.tune_world and (args.world_readout_steps != 5 or args.optimizer_profile != 'differential'): raise ValueError('Partial world uses five maps and differential LR')
+    if args.bev_encoder == 'geobev' and (args.warm_start or not args.integrated_motion_gate or not args.adaptive_sampling or not args.tune_world):
+        raise ValueError('GeoBEV requires fresh integrated/adaptive/partial-world training; legacy warm-start is unsupported')
+    checkpoint_format = INTEGRATED_MOTION_FORMAT if args.integrated_motion_gate else MOTION_GATE_FORMAT if args.motion_state_gate else JOINT_FORMAT
+    architecture_version = 8 if args.integrated_motion_gate else MOTION_GATE_VERSION if args.motion_state_gate else ARCHITECTURE_VERSION
+    if args.bev_encoder == 'geobev':
+        from geobev_encoder import GEOBEV_FORMAT, GEOBEV_VERSION
+        checkpoint_format, architecture_version = GEOBEV_FORMAT, GEOBEV_VERSION
+    if args.candidate_mode != 'legacy':
+        from candidate_interaction import CANDIDATE_FORMAT, CANDIDATE_VERSION
+        checkpoint_format, architecture_version = CANDIDATE_FORMAT, CANDIDATE_VERSION
+    world_tuning = None
+    if args.plan_a:
+        if args.candidate_mode != 'full' or args.world_tuning_scope != 'partial' or args.warm_start or args.warm_start_geobev:
+            raise ValueError('Plan A requires full candidate geometry, partial IRWM and original fresh initialization')
+        from plan_a import PLAN_A_FORMAT, PLAN_A_VERSION
+        checkpoint_format, architecture_version = PLAN_A_FORMAT, PLAN_A_VERSION
+    if args.position_gradient_every < 0 or not 0 < args.position_target_ratio < 1:
+        raise ValueError('Invalid position gradient monitoring settings')
+    if args.position_gradient_every and (not args.plan_a or args.grad_accum != 1):
+        raise ValueError('Position gradient probe requires Plan A with grad_accum=1')
+    if args.world_tuning_scope == 'full' and (not args.tune_world or args.bev_encoder != 'geobev' or args.candidate_mode == 'legacy'):
+        raise ValueError('Full IRWM training requires GeoBEV candidate mode and --tune-world')
+    if args.tune_world:
+        from world_models.world_partial import WORLD_TUNING_CONFIG, FULL_WORLD_TUNING_CONFIG
+        world_tuning = FULL_WORLD_TUNING_CONFIG if args.world_tuning_scope == 'full' else WORLD_TUNING_CONFIG
+    if min(args.batch_size, args.grad_accum, args.epochs, args.log_every) < 1 or min(args.workers, args.monitor_every) < 0:
+        raise ValueError('invalid batch/accum/epochs/workers')
+    distributed = int(os.environ.get('WORLD_SIZE', '1')) > 1
+    device = torch.device('cuda', int(os.environ.get('LOCAL_RANK', '0')))
+    torch.cuda.set_device(device)
+    if distributed:
+        dist.init_process_group('nccl')
+    rank = dist.get_rank() if distributed else 0
+    world_size = dist.get_world_size() if distributed else 1
+    if rank == 0:
+        print(json.dumps(dict(event='startup', architecture_version=architecture_version, epochs=args.epochs,
+                              points_per_map=args.points_per_map, precision=args.precision, monitor_every=args.monitor_every)), flush=True)
+    torch.set_num_threads(min(4, max(1, int(os.environ.get('OMP_NUM_THREADS', '4')))))
+    torch.manual_seed(args.seed + rank)
+    np.random.seed(args.seed + rank)
+    random.seed(args.seed + rank)
+    dataset_type = TemporalNuScenesDataset
+    if args.bev_encoder == 'geobev':
+        from geobev_encoder.dataset import GeoBEVNuScenesDataset
+        dataset_type = GeoBEVNuScenesDataset
+    dataset = dataset_type(args.data_root, str(Path(args.data_root) / 'nuscenes_infos_train.pkl'))
+    sampler = SceneStreamBatchSampler(dataset, args.batch_size, rank, world_size, args.seed)
+    loader = DataLoader(dataset, batch_sampler=sampler, num_workers=args.workers,
+                        collate_fn=temporal_collate, pin_memory=True,
+                        multiprocessing_context='spawn' if args.workers else None,
+                        persistent_workers=args.workers > 0)
+    model_type = JointGate12TemporalModel
+    if args.bev_encoder == 'geobev':
+        from geobev_encoder.model import GeoBEVTemporalModel
+        if not issubclass(model_type, GeoBEVTemporalModel): model_type = GeoBEVTemporalModel
+    model = model_type(args.base_checkpoint, args.world_checkpoint, args.world_root,
+                                  seed=args.seed, initialization_seed=args.seed,
+                                  fusion_config={k: getattr(args, k) for k in DEFAULT_FUSION_CONFIG},
+                                  sampler_config=ADAPTIVE_SAMPLER_CONFIG if args.adaptive_sampling else dict(points_per_map=args.points_per_map,
+                                                      window_m=args.window_m, offset_mode=args.offset_mode),
+                                  motion_gate_config=INTEGRATED_MOTION_GATE_CONFIG if args.integrated_motion_gate else DEFAULT_MOTION_GATE_CONFIG if args.motion_state_gate else None,
+                                  world_tuning_config=world_tuning,
+                                  **(dict(geobev_checkpoint=args.geobev_checkpoint,depth_loss_weight=args.depth_loss_weight) if args.bev_encoder == 'geobev' else {})).to(device)
+    warm_start_audit = (warm_start_integrated(model, args.warm_start) if args.integrated_motion_gate else warm_start_v6(model, args.warm_start)) if args.warm_start else None
+    if args.warm_start_geobev:
+        from candidate_interaction import warm_start_v9
+        warm_start_audit = warm_start_v9(model, args.warm_start_geobev)
+    audit_fresh = audit_fresh_v8
+    fresh_profile = FRESH_V8_PROFILE
+    if args.bev_encoder == 'geobev':
+        from geobev_encoder.checkpoint import audit_fresh_geobev
+        from geobev_encoder import GEOBEV_PROFILE
+        audit_fresh, fresh_profile = audit_fresh_geobev, GEOBEV_PROFILE
+    fresh_audit = audit_fresh(model, args.base_checkpoint, args.world_checkpoint, args.seed) if args.fresh_res and not args.resume else None
+    if args.resume:
+        preview = torch.load(args.resume, map_location='cpu')
+        warm_start_audit = preview['metadata'].get('warm_start_audit')
+        fresh_audit = preview['metadata'].get('fresh_initialization_audit')
+        if args.fresh_res and (fresh_audit is None or fresh_audit.get('profile') != fresh_profile):
+            raise RuntimeError('Resume checkpoint was not produced by an audited fresh V8 run')
+        del preview
+    if args.candidate_mode != 'legacy':
+        from candidate_interaction import activate, config_for_mode
+        activate(model, config_for_mode(args.candidate_mode))
+    if args.plan_a:
+        from plan_a import activate as activate_plan_a, DEFAULT_CONFIG
+        activate_plan_a(model, dict(DEFAULT_CONFIG, position_loss_weight=args.position_loss_weight))
+    diagnostic_depth = len(model.base.planner.layers)
+    optimization = configure_training(model, args)
+    if args.plan_a:
+        optimization['position_gradient_monitor'] = dict(interval=args.position_gradient_every,
+            target_ratio=args.position_target_ratio, reference_band=[.5*args.position_target_ratio,1.5*args.position_target_ratio],
+            scope='global_parameter_gradients_shared_head_and_layers_10_11',
+            numerator='effective_position_coefficient_times_position_gradient_norm',
+            denominator='weighted_11_layer_x0_gradient_norm', automatic_reweighting=False)
+    if args.calibrate_position_loss:
+        if not args.plan_a or args.resume:
+            raise ValueError('Calibration requires a disposable fresh Plan A run')
+        from plan_a_calibration import run as calibrate
+        calibrate(model, loader, sampler, args.work_dir, args.calibrate_position_loss, args.precision)
+        return
+    model.train()
+    if any(parameter.requires_grad != model.is_trainable(name) for name, parameter in model.named_parameters()):
+        raise AssertionError('joint trainable scope differs from all CVCI2 + future modules')
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    groups, group_manifest = optimizer_groups(model, args.optimizer_profile, args.lr,
+        args.image_lr, args.pretrained_lr, args.planner_lr, args.future_lr, args.offset_lr, world_lr=args.world_lr,
+        gate_lr=args.gate_lr, distance_lr=args.distance_lr, current_point_lr=args.current_point_lr,
+        weight_decay=args.weight_decay, new_weight_decay=args.new_weight_decay)
+    optimizer = AdamW(groups, weight_decay=args.weight_decay)
+    control_monitor = ControlUpdateMonitor(model)
+    optimization['optimizer_groups'] = group_manifest
+    steps = args.steps_per_epoch or math.ceil(len(dataset) / (world_size * args.batch_size))
+    updates_per_epoch = math.ceil(steps / args.grad_accum)
+    updates = args.epochs * updates_per_epoch
+    # Keep 500-update warmup; compute the complete cosine budget from the requested epochs.
+    warmup = min(args.warmup_steps, max(updates - 1, 0))
+    def schedule(step):
+        if warmup and step < warmup:
+            return (step + 1) / warmup
+        progress = min(1, max(0, (step - warmup) / max(updates - warmup, 1)))
+        return 1e-3 + (1 - 1e-3) * 0.5 * (1 + math.cos(math.pi * progress))
+    scheduler = LambdaLR(optimizer, schedule)
+    metadata = None
+    if rank == 0:
+        root = Path(__file__).resolve().parents[1]
+        code = source_fingerprints(root)
+        code['motion_gate.py'] = file_sha256(root/'motion_gate.py')
+        for name in ('integrated_checkpoint.py','world_models/world_partial.py','world_models/adaptive_sampler.py','fresh_v8_initialization.py'):
+            code[name] = file_sha256(root/name)
+        if args.bev_encoder == 'geobev':
+            for path in sorted((root/'geobev_encoder').glob('*.py')):
+                code[path.relative_to(root).as_posix()] = file_sha256(path)
+            code['tools/train_geobev_h20.py'] = file_sha256(root/'tools/train_geobev_h20.py')
+        metadata = {'architecture_version': architecture_version,
+                    'checkpoint_format': checkpoint_format, 'training_scope': model.training_scope,
+                    'world_tuning_config': model.world_tuning_config,
+                    'initialization_profile': ('v9_weights_fresh_optimizer' if warm_start_audit is not None and warm_start_audit.get('source_architecture_version') == 9 else fresh_profile if args.fresh_res else 'v6_A9_weights_fresh_optimizer' if warm_start_audit is not None else INITIALIZATION_PROFILE),
+                    'fresh_initialization_audit': fresh_audit,
+                    'plan_a_initialization_audit': getattr(model, 'plan_a_initialization_audit', None),
+                    'warm_start_audit': warm_start_audit,
+                    'motion_gate_config': model.motion_gate_config,
+                    'initialization_seed': args.seed,
+                    'training_optimization': optimization,
+                    'fusion_config': model.fusion_config,
+                    'sampler_config': model.sampler_config,
+                    'future_condition_tokens': model.future_encoder.num_tokens,
+                    'sampling_alignment': 'same_time_diagonal',
+                    'sampled_future_horizons_s': [.5, 1., 1.5, 2., 2.5],
+                    'sampled_extrapolated_waypoint': False,
+                    'world_rollout_steps': 6, 'planner_output_points': 6,
+                    'singleton_sampling': 'fixed_matched_center' if 1 in args.points_per_map else 'not_applicable',
+                    'offset_residual_window_fraction': .25,
+                    'global_future_tokens': 0, 'qformer_compression': False,
+                    'precision_config': {'autocast': args.precision, 'planner_head': 'fp32',
+                                         'loss': 'fp32', 'ddim_state_and_update': 'fp32',
+                                         'rolling_coordinates': 'fp32_or_fp64', 'world_forward_backward': 'fp32',
+                                         'parameters_and_optimizer': 'fp32', 'grad_scaler': False},
+                    'fresh_trainable_modules': (warm_start_audit['new_parameter_slices'] if args.integrated_motion_gate and warm_start_audit is not None else ((['base.planner.layers.*.future_motion_projection.weight']
+                        if args.motion_state_gate else []) if warm_start_audit is not None else
+                        ['base.planner.layers.*.future_*','future_encoder.*'])),
+                    'frozen_pretrained_modules': ([] if args.world_tuning_scope == 'full' else ['world except explicitly listed tuning prefixes']) if args.tune_world else ['world'],
+                    'joint_pretrained_modules': (['all A9 trainable tensors'] if warm_start_audit is not None else
+                        ['all shared CVCI2 gate12 parameters']),
+                    **planning_model_metadata(model),
+                    'rolling_state_initialization': 'empty on a new run; restored only with explicit resume',
+                    'monitor_schema': 'global_weighted_matched_five_maps_v2',
+                    'monitor_every': args.monitor_every,
+                    'trajectory_transform': TRAJECTORY_TRANSFORM_VERSION,
+                    'loss_definition': planning_model_metadata(model)['loss_definition'] if args.plan_a else ('equal' if args.x0_layer_weights is None else 'weighted') + '_12_layer_x0_plus_configured_perception_and_depth',
+                    'training_recipe_sha256': file_sha256(Path(__file__)),
+                    'launch_recipe_sha256': file_sha256(os.environ['CVCI_TRAINING_RECIPE_FILE']) if os.environ.get('CVCI_TRAINING_RECIPE_FILE') else None,
+                    'dataset_stream_sha256': dataset.stream_fingerprint,
+                    'base_sha256': file_sha256(args.base_checkpoint),
+                    'world_sha256': file_sha256(args.world_checkpoint), 'code_sha256': code,
+                    'runtime_manifest_sha256': file_sha256(root / 'vendor/SHA256SUMS'),
+                    'world_config_sha256': file_sha256(Path(args.world_root) /
+                        'projects/configs/e2e/MMO_MSO_with_plan_tightly_coupled.py'),
+                    'bev_encoder': args.bev_encoder,
+                    'geobev_config': getattr(model, 'geobev_config', None),
+                    'geobev_sha256': file_sha256(args.geobev_checkpoint) if args.bev_encoder == 'geobev' else None,
+                    'config': vars(args), 'world_size': world_size, 'steps_per_epoch': steps,
+                    'lr_schedule': {'name': 'linear_warmup_cosine',
+                                    'step_unit': 'optimizer_update',
+                                    'updates_per_epoch': updates_per_epoch,
+                                    'total_updates': updates, 'warmup_updates': warmup,
+                                    'peak_lr': args.lr, 'min_lr': args.lr * 1e-3,
+                                    'groups': {g['name']: {'peak_lr': g['peak_lr'], 'min_lr': g['peak_lr']*1e-3} for g in group_manifest}},
+                    'trainable_params': sum(p.numel() for p in trainable),
+                    'dit_trainable_params': sum(p.numel() for n, p in model.named_parameters()
+                                                if n.startswith('base.planner.') and p.requires_grad),
+                    'future_encoder_trainable_params': sum(p.numel() for n, p in model.named_parameters()
+                                                       if n.startswith('future_encoder.') and p.requires_grad),
+                    'nominal_effective_batch': world_size * args.batch_size * args.grad_accum,
+                    'dataloader_start_method': 'spawn',
+                    'ddim_indices': torch.linspace(99,0,args.ddim_steps).round().long().tolist(), 'cold_start_frames': 3,
+                    'future_map_local_point': 'p_h_minus_p_h_plus_grid_and_bounded_residual'}
+    if distributed:
+        objects = [metadata]
+        dist.broadcast_object_list(objects, src=0)
+        metadata = objects[0]
+    work = Path(args.work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    if args.fresh_res and not args.resume and rank == 0:
+        initial = {'format': checkpoint_format, 'epoch': 0, 'trainable': joint_state_dict(model), 'metadata': metadata}
+        path = work/'initial_state.pth'
+        if path.exists():
+            prior_initial = torch.load(path, map_location='cpu')
+            assert state_digest(prior_initial['trainable']) == state_digest(initial['trainable'])
+            del prior_initial
+        else: atomic_save(initial, path)
+        del initial
+    start_epoch, optimizer_updates = 0, 0
+    saved_rng = None
+    if args.resume:
+        saved = torch.load(args.resume, map_location='cpu')
+        if saved.get('format') != checkpoint_format:
+            raise RuntimeError('resume requires a v6 gate12 x0 joint-training last.pth')
+        for key in ('architecture_version', 'dataset_stream_sha256', 'world_size',
+                    'base_sha256', 'world_sha256', 'code_sha256', 'runtime_manifest_sha256',
+                    'world_config_sha256', 'training_scope', 'checkpoint_format',
+                    'bev_encoder', 'geobev_config', 'geobev_sha256',
+                    'initialization_profile', 'initialization_seed', 'training_recipe_sha256',
+                    'fusion_config', 'sampler_config', 'trajectory_transform', 'future_condition_tokens',
+                    'motion_gate_config', 'warm_start_audit', 'world_tuning_config', 'fresh_initialization_audit',
+                    'sampling_alignment', 'sampled_future_horizons_s', 'sampled_extrapolated_waypoint',
+                    'world_rollout_steps', 'planner_output_points', 'singleton_sampling',
+                    'offset_residual_window_fraction', 'precision_config', 'training_optimization'):
+            if saved['metadata'].get(key) != metadata[key]:
+                raise RuntimeError(f'resume {key} mismatch')
+        if args.plan_a and saved['metadata'].get('plan_a_config') != model.plan_a_config:
+            raise RuntimeError('Resume Plan A contract differs')
+        if bool(saved['metadata']['config'].get('plan_a', False)) != args.plan_a:
+            raise RuntimeError('Resume planner architecture differs')
+        if args.plan_a and saved['metadata']['config']['position_loss_weight'] != args.position_loss_weight:
+            raise RuntimeError('Resume position loss coefficient differs')
+        if saved['metadata']['config'].get('world_tuning_scope', 'partial') != args.world_tuning_scope:
+            raise RuntimeError('Resume world tuning scope differs')
+        if saved['metadata'].get('launch_recipe_sha256') != metadata.get('launch_recipe_sha256'):
+            raise RuntimeError('Resume launch recipe fingerprint differs')
+        if args.candidate_mode != 'legacy' and saved['metadata'].get('candidate_config') != model.candidate_config:
+            raise RuntimeError('Resume candidate interaction contract differs')
+        for key in ('batch_size', 'grad_accum', 'seed', 'lr', 'weight_decay', 'epochs',
+                    'future_dropout', 'ddim_steps', 'warmup_steps',
+                    'points_per_map', 'window_m', 'offset_mode', 'precision',
+                    'optimizer_profile', 'image_lr', 'pretrained_lr', 'planner_lr', 'future_lr',
+                    'offset_lr', 't99_fraction', 'auxiliary_weights', 'world_readout_steps', 'loss_diagnostics', 'motion_state_gate', 'integrated_motion_gate', 'adaptive_sampling', 'tune_world', 'world_lr', 'no_world_checkpoint', 'fresh_res', 'bev_encoder', 'geobev_checkpoint', 'depth_loss_weight',
+                    'gate_lr', 'distance_lr', 'current_point_lr', 'new_weight_decay', 'x0_layer_weights',
+                    'geobev_color_probability', 'geobev_color_strength', 'train_cold_start_planning'):
+            if saved['metadata']['config'][key] != vars(args)[key]:
+                raise RuntimeError(f'resume config mismatch: {key}')
+        if saved['metadata']['steps_per_epoch'] != steps:
+            raise RuntimeError('resume steps_per_epoch mismatch')
+        if saved['metadata']['config'].get('candidate_mode', 'legacy') != args.candidate_mode:
+            raise RuntimeError('Resume candidate mode differs')
+        load_joint_state(model, saved['trainable'], saved['metadata']['architecture_version'])
+        optimizer.load_state_dict(saved['optimizer'])
+        moved = restore_fused_optimizer_devices(optimizer)
+        if rank == 0:
+            print(json.dumps({'event': 'fused_optimizer_state_restored', 'moved_tensors': moved}), flush=True)
+        scheduler.load_state_dict(saved['scheduler'])
+        local = saved['rank_states'][rank]
+        sampler.load_state_dict(local['sampler'])
+        model.stream.load_state_dict(local['rolling'], dataset, device)
+        control_monitor.load_state_dict(local['control_monitor'])
+        saved_rng = local['rng']
+        start_epoch, optimizer_updates = saved['next_epoch'], saved['optimizer_updates']
+    if args.plan_a:
+        model.base.planner.position_loss_update = optimizer_updates
+    # Perception is jointly trained; only IRWM remains in eval mode.
+    wrapped = DDP(model, device_ids=[device.index], find_unused_parameters=False,
+                  broadcast_buffers=False) if distributed else model
+    writer = None
+    if rank == 0:
+        tensorboard_dir = Path(args.tensorboard_dir) if args.tensorboard_dir else work / 'tensorboard'
+        writer = SummaryWriter(str(tensorboard_dir), flush_secs=30,
+                               purge_step=start_epoch * steps + 1 if args.resume else None)
+        if not args.resume:
+            writer.add_text('configuration/json', json.dumps(metadata, indent=2), 0)
+            writer.add_scalar('configuration/trainable_parameters', metadata['trainable_params'], 0)
+            writer.flush()
+        print(f'tensorboard_dir={tensorboard_dir}', flush=True)
+    # Create writer/iterator before restoring RNG for exact interrupted resume.
+    loader.generator = torch.Generator().manual_seed(args.seed + rank + 900000)
+    iterator = iter(loader)
+    if saved_rng is not None:
+        restore_rng(saved_rng)
+        if args.verify_ddp:
+            audit = verify_restored_state(model, optimizer, scheduler, sampler, rng_state(), saved, rank, control_monitor)
+            audits = [None]*world_size
+            if distributed:
+                dist.all_gather_object(audits, audit)
+            else:
+                audits[0] = audit
+            if rank == 0:
+                (work/'resume_state_audit.json').write_text(json.dumps({'status':'PASS','ranks':audits},indent=2))
+                print(json.dumps({'event':'exact_resume_state_verified','ranks':world_size}),flush=True)
+    if rank == 0:
+        print(json.dumps({'event': 'configuration', **metadata}, default=str), flush=True)
+        (work / 'config.json').write_text(json.dumps(metadata, indent=2, default=str))
+        if warm_start_audit is not None:
+            (work/'warm_start_audit.json').write_text(json.dumps(warm_start_audit, indent=2))
+        if fresh_audit is not None:
+            (work/'fresh_initialization_audit.json').write_text(json.dumps(fresh_audit, indent=2))
+    last_monitor_bucket = (start_epoch*steps)//max(args.monitor_every,1)
+    try:
+        optimizer.zero_grad(set_to_none=True)
+        for epoch in range(start_epoch, args.epochs):
+            samples_window = torch.zeros((), device=device)
+            running = torch.zeros(14, device=device)
+            previous_logged = torch.zeros(14, device=device)
+            diagnostic_running = torch.zeros(len(loss_diagnostic_keys(diagnostic_depth)), 2, device=device)
+            last_grad_norm = None
+            started = time.monotonic()
+            for step in range(steps):
+                load_start = time.perf_counter()
+                batch = to_device(next(iterator), device)
+                data_host_seconds = time.perf_counter()-load_start
+                if step == 0 and (os.environ.get('CVCI_DETERMINISTIC_CHECKS') == '1' or
+                                  os.environ.get('CVCI_RECORD_INPUT_HASHES') == '1'):
+                    sample_hash = {'tokens': [str(m['token']) for m in batch['meta']],
+                        'tensors': {name: hashlib.sha256(batch[name].detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+                                    for name in (('camera','lidar','status','command','trajectory_delta','mask') + (('geobev_image','geobev_sensor2ego','geobev_intrinsics','geobev_post_rots','geobev_post_trans','geobev_ego2global','geobev_depth_s16','geobev_depth_s8') if args.bev_encoder == 'geobev' else ()))}}
+                    batch_hashes = [None]*world_size
+                    if distributed:
+                        dist.all_gather_object(batch_hashes, sample_hash)
+                    else:
+                        batch_hashes[0] = sample_hash
+                    if rank == 0:
+                        (work/('input_hash_epoch_%02d.json'%(epoch+1))).write_text(json.dumps(batch_hashes,indent=2))
+                micro_step = epoch*steps+step+1
+                end_update = (step + 1) % args.grad_accum == 0 or step + 1 == steps
+                monitor_this = bool(args.monitor_every and end_update and
+                                    (micro_step//args.monitor_every > last_monitor_bucket or step+1 == steps))
+                monitor_extra = {}
+                sync_context = wrapped.no_sync() if distributed and not end_update else contextlib.nullcontext()
+                if args.plan_a:
+                    model.base.planner.position_loss_update = optimizer_updates + 1
+                    probe_this = bool(args.position_gradient_every and end_update and
+                        (optimizer_updates == 0 or (optimizer_updates+1)%args.position_gradient_every == 0 or step+1 == steps))
+                    model.base.planner.gradient_probe_requested = probe_this
+                with sync_context:
+                    with autocast(enabled=args.precision == 'bf16', dtype=torch.bfloat16):
+                        output = wrapped(batch, monitor=monitor_this, ddim_steps=args.ddim_steps)
+                    if args.plan_a and probe_this:
+                        from position_gradient_monitor import measure
+                        probe = measure(model.base.planner, args.position_target_ratio)
+                        if abs(probe['x0_replay']-float(output['loss_x0'])) > 1e-6 or abs(probe['position_replay_m']-float(output['loss_position'])) > 1e-5:
+                            raise AssertionError('Position gradient probe did not replay the same training objective')
+                        if rank == 0:
+                            row = dict(event='position_gradient_ratio', epoch=epoch+1, micro_step=micro_step, **probe)
+                            with (work/'position_gradient_ratio.jsonl').open('a') as stream:
+                                stream.write(json.dumps(row)+'\n')
+                            for key in ('gradient_x0_norm','gradient_position_unweighted_norm','weighted_ratio',
+                                        'ratio_at_full_coefficient','target_ratio','effective_target_ratio','gradient_cosine',
+                                        'outside_reference_band','t99_valid_samples'):
+                                writer.add_scalar('loss_balance/'+key, float(probe[key]), micro_step)
+                            print(json.dumps(row), flush=True)
+                    samples = output['loss'].new_tensor(len(batch['camera']))
+                    # Accumulate sample-weighted CVCI2 joint losses, including cold-start perception losses.
+                    (output['loss'] * samples).backward()
+                samples_window += samples.detach()
+                running += torch.stack((output['loss'].detach() * samples, samples,
+                                         output['ready'].sum(), output['prior_valid'].sum(),
+                                         output['loss_x0'].detach() * samples,
+                                         output['loss_auxiliary'].detach() * samples, output['future_used'].sum(),
+                                         output['loss_agent_class'].detach() * samples,
+                                         output['loss_agent_box'].detach() * samples,
+                                         output['loss_occupancy'].detach() * samples,
+                                         output['loss_depth'].detach() * samples,
+                                         output['loss_x0_unweighted'].detach() * samples,
+                                         output['loss_position'].detach() * samples,
+                                         output['position_loss_coefficient'].detach() * samples))
+                if args.loss_diagnostics:
+                    diagnostic_running += output['loss_diagnostics']
+                sampler.commit()
+                if end_update:
+                    if distributed:
+                        dist.all_reduce(samples_window)
+                    if float(samples_window) > 0:
+                        for parameter in trainable:
+                            if parameter.grad is not None:
+                                parameter.grad.mul_(world_size / samples_window)
+                        if monitor_this:
+                            monitor_extra.update(gradient_monitor(model))
+                            norms = [p.grad.detach().float().norm() for n,p in model.named_parameters() if n.startswith('world.') and p.requires_grad and p.grad is not None]
+                            world_norm = torch.stack(norms).norm() if norms else torch.zeros((),device=device)
+                            monitor_extra['gradient/world_tuned_norm'] = torch.stack((world_norm, torch.ones_like(world_norm)))
+                        norm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                        if not torch.isfinite(norm):
+                            raise FloatingPointError('non-finite joint-training gradients')
+                        last_grad_norm = float(norm)
+                        control_monitor.before_step()
+                        regularization_before = regularization_snapshot(optimizer) if monitor_this else None
+                        optimizer.step()
+                        control_monitor.after_step(monitor_this)
+                        if monitor_this:
+                            monitor_extra.update(control_monitor.last)
+                            monitor_extra.update(regularization_monitor(optimizer, regularization_before))
+                        del regularization_before
+                        scheduler.step()
+                        optimizer_updates += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    samples_window.zero_()
+                if monitor_this:
+                    monitor_extra['timing/data_loader_host_seconds'] = torch.tensor([data_host_seconds,1.], device=device)
+                    write_monitor(model, monitor_extra, writer, work, epoch+1, micro_step, distributed)
+                    last_monitor_bucket = micro_step//args.monitor_every
+                if (step + 1) % args.log_every == 0 or step + 1 == steps:
+                    # Every rank participates; logging represents all GPUs, not rank 0.
+                    global_running = running.detach().clone()
+                    if distributed:
+                        dist.all_reduce(global_running)
+                    global_diagnostics = diagnostic_running.clone()
+                    if args.loss_diagnostics and distributed:
+                        dist.all_reduce(global_diagnostics)
+                    interval = global_running - previous_logged
+                    previous_logged = global_running
+                    if rank == 0:
+                        micro_step = epoch * steps + step + 1
+                        lr = scheduler.get_last_lr()[0]
+                        lr_groups = {group['name']: float(group['lr']) for group in optimizer.param_groups}
+                        diagnostics = diagnostic_values(global_diagnostics, diagnostic_depth) if args.loss_diagnostics else {}
+                        if args.plan_a:
+                            writer.add_scalar('train/position_loss_m', float(global_running[12]/global_running[1].clamp_min(1)), micro_step)
+                            writer.add_scalar('train/position_loss_coefficient', float(interval[13]/interval[1].clamp_min(1)), micro_step)
+                        for name, value in lr_groups.items():
+                            writer.add_scalar('train/lr_groups/'+name, value, micro_step)
+                        for name, value in diagnostics.items():
+                            writer.add_scalar('train/x0_diagnostics/'+name, value, micro_step)
+                        if float(global_running[1]) > 0:
+                            writer.add_scalar('train/x0_mse_epoch_so_far',
+                                              float(global_running[11] / global_running[1]), micro_step)
+                            writer.add_scalar('train/x0_weighted_epoch_so_far',
+                                              float(global_running[4] / global_running[1]), micro_step)
+                        if float(interval[1]) > 0:
+                            writer.add_scalar('train/x0_mse_interval',
+                                              float(interval[11] / interval[1]), micro_step)
+                            writer.add_scalar('train/x0_weighted_interval', float(interval[4] / interval[1]), micro_step)
+                            writer.add_scalar('train/loss_total_interval', float(interval[0] / interval[1]), micro_step)
+                            writer.add_scalar('train/perception_aux_interval', float(interval[5] / interval[1]), micro_step)
+                        for index,name in [(7,'agent_class'),(8,'agent_box'),(9,'occupancy'),(10,'depth')]:
+                            writer.add_scalar('train/'+name+'_interval', float(interval[index]/interval[1].clamp_min(1)), micro_step)
+                        writer.add_scalar('train/future_usage_interval', float(interval[6] / interval[2].clamp_min(1)), micro_step)
+                        layers = [layer for layer in model.base.planner.layers if hasattr(layer, 'last_point_gate')]
+                        if layers and all(layer.last_point_gate is not None for layer in layers):
+                            writer.add_scalar('fusion/rank0_point_gate_last_sample',
+                                              float(torch.stack([layer.last_point_gate.float().mean() for layer in layers]).mean()), micro_step)
+                            writer.add_scalar('fusion/rank0_residual_ratio_last_sample',
+                                              float(torch.stack([layer.last_residual_ratio.float().mean() for layer in layers]).mean()), micro_step)
+                        writer.add_scalar('train/lr', lr, micro_step)
+                        writer.add_scalar('train/samples_interval', float(interval[1]), micro_step)
+                        writer.add_scalar('train/ready_frames_interval', float(interval[2]), micro_step)
+                        writer.add_scalar('train/prior_valid_frames_interval', float(interval[3]), micro_step)
+                        writer.add_scalar('train/optimizer_updates', optimizer_updates, micro_step)
+                        writer.add_scalar('system/rank0_max_memory_mib', torch.cuda.max_memory_allocated()/2**20, micro_step)
+                        if last_grad_norm is not None:
+                            writer.add_scalar('train/grad_norm_before_clip', last_grad_norm, micro_step)
+                        writer.flush()
+                        print(json.dumps({'epoch': epoch + 1, 'step': step + 1, 'steps': steps,
+                                          'loss_global': float(global_running[0] / global_running[1].clamp_min(1)),
+                                          'loss_total_global': float(global_running[0] / global_running[1].clamp_min(1)),
+                                          'x0_mse_global': float(global_running[11] / global_running[1].clamp_min(1)),
+                                          'x0_weighted_global': float(global_running[4] / global_running[1].clamp_min(1)),
+                                          'perception_aux_global': float(global_running[5] / global_running[1].clamp_min(1)),
+                                          'position_loss_m_global': float(global_running[12]/global_running[1].clamp_min(1)),
+                                          'position_loss_coefficient': float(interval[13]/interval[1].clamp_min(1)),
+                                          'depth_loss_global': float(global_running[10] / global_running[1].clamp_min(1)),
+                                          'future_used_global': int(global_running[6]),
+                                          'ready_global': int(global_running[2]), 'prior_valid_global': int(global_running[3]),
+                                          'lr': lr, 'lr_groups': lr_groups, 'x0_diagnostics': diagnostics,
+                                          'optimizer_updates': optimizer_updates,
+                                          'seconds': time.monotonic() - started,
+                                          'max_memory_mib': torch.cuda.max_memory_allocated() / 2**20}), flush=True)
+            synchronize_base_buffers(model)
+            local_state = {'sampler': sampler.state_dict(), 'rolling': model.stream.state_dict(),
+                           'rng': rng_state(), 'control_monitor': control_monitor.state_dict()}
+            if args.verify_ddp and distributed:
+                digest = hashlib.sha256()
+                for value in joint_state_dict(model).values():
+                    digest.update(value.contiguous().numpy().tobytes())
+                hashes = [None] * world_size
+                dist.all_gather_object(hashes, digest.hexdigest())
+                if len(set(hashes)) != 1:
+                    raise AssertionError(f'joint CVCI2/future state diverged across ranks: {hashes}')
+                if rank == 0:
+                    print(json.dumps({'event': 'ddp_joint_agreement', 'epoch': epoch + 1,
+                                      'ranks': world_size, 'sha256': hashes[0]}), flush=True)
+            states = [None] * world_size
+            if distributed:
+                dist.all_gather_object(states, local_state)
+            else:
+                states[0] = local_state
+            if distributed:
+                dist.all_reduce(running)
+            if rank == 0:
+                parameters = joint_state_dict(model)
+                compact = {'format': checkpoint_format, 'epoch': epoch + 1,
+                           'trainable': parameters, 'metadata': metadata,
+                           'train_x0': float(running[11] / running[1].clamp_min(1)),
+                           'train_x0_weighted': float(running[4] / running[1].clamp_min(1)),
+                           'train_total': float(running[0] / running[1].clamp_min(1)),
+                           'train_perception_aux': float(running[5] / running[1].clamp_min(1)),
+                           'train_position_m': float(running[12]/running[1].clamp_min(1)),
+                           'train_depth': float(running[10] / running[1].clamp_min(1))}
+                atomic_save(compact, work / f'epoch_{epoch + 1:02d}.pth')
+                atomic_save({**compact, 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(),
+                             'rank_states': states, 'next_epoch': epoch + 1,
+                             'optimizer_updates': optimizer_updates}, work / 'last.pth')
+                event_step = (epoch + 1) * steps
+                writer.add_scalar('epoch/x0_mse_global', compact['train_x0'], event_step)
+                writer.add_scalar('epoch/loss_total_global', compact['train_total'], event_step)
+                writer.add_scalar('epoch/perception_aux_global', compact['train_perception_aux'], event_step)
+                writer.add_scalar('epoch/index', epoch + 1, event_step)
+                writer.add_scalar('epoch/seconds', time.monotonic() - started, event_step)
+                for index, layer in enumerate(model.base.planner.layers):
+                    if hasattr(layer, 'future_gate'):
+                        writer.add_scalar(f'gate/layer_{index}', float(layer.future_gate.detach()), event_step)
+                writer.flush()
+            if distributed:
+                dist.barrier()
+            if args.stop_after_epoch and epoch + 1 >= args.stop_after_epoch:
+                break
+    finally:
+        if writer is not None:
+            writer.close()
+        if distributed and dist.is_initialized():
+            dist.destroy_process_group()
+
+
+
+if __name__ == '__main__':
+    main()

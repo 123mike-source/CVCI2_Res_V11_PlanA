@@ -1,0 +1,7 @@
+{
+  "mmcv": "1.7.2",
+  "torch": "2.0.0+cu118",
+  "cuda": "11.8",
+  "architecture": "sm_90",
+  "wheel": "/mnt/workspace/nix3sgh/CVCI2_Res/ENV/native_wheels/mmcv_full-1.7.2-cp38-cp38-linux_x86_64.whl"
+}

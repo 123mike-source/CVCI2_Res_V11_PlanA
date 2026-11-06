@@ -1,0 +1,62 @@
+[
+  {
+    "epoch": 1,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_01.pth",
+    "rolling_4585_L2_m": 0.44119570608139136,
+    "full_valid_5119_L2_m": 0.44034977057115476
+  },
+  {
+    "epoch": 2,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_02.pth",
+    "rolling_4585_L2_m": 0.5083271321920678,
+    "full_valid_5119_L2_m": 0.5104055593755128
+  },
+  {
+    "epoch": 3,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_03.pth",
+    "rolling_4585_L2_m": 0.3789170332287341,
+    "full_valid_5119_L2_m": 0.3805118950072725
+  },
+  {
+    "epoch": 4,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_04.pth",
+    "rolling_4585_L2_m": 0.49439419950110874,
+    "full_valid_5119_L2_m": 0.49728327992270377
+  },
+  {
+    "epoch": 5,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_05.pth",
+    "rolling_4585_L2_m": 0.39436594457454266,
+    "full_valid_5119_L2_m": 0.39692822593108773
+  },
+  {
+    "epoch": 6,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_06.pth",
+    "rolling_4585_L2_m": 0.3473537248403182,
+    "full_valid_5119_L2_m": 0.3490182940171027
+  },
+  {
+    "epoch": 7,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_07.pth",
+    "rolling_4585_L2_m": 0.3448510287896965,
+    "full_valid_5119_L2_m": 0.34634669639996646
+  },
+  {
+    "epoch": 8,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_08.pth",
+    "rolling_4585_L2_m": 0.3502661331208578,
+    "full_valid_5119_L2_m": 0.3517717971828571
+  },
+  {
+    "epoch": 9,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_09.pth",
+    "rolling_4585_L2_m": 0.33712984241426797,
+    "full_valid_5119_L2_m": 0.3383836238182842
+  },
+  {
+    "epoch": 10,
+    "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_10.pth",
+    "rolling_4585_L2_m": 0.3348161081980611,
+    "full_valid_5119_L2_m": 0.3361864505439575
+  }
+]

@@ -1,0 +1,13 @@
+{
+  "scope": "shared_head_and_layers_10_11",
+  "valid_post_warmup_probes": 64,
+  "median": 0.3097702233197483,
+  "minimum": 0.09158885520156566,
+  "maximum": 1.1306385113921709,
+  "in_10_to_30_percent": 29,
+  "above_30_percent": 34,
+  "below_10_percent": 1,
+  "last_ratio": 0.1345081000991889,
+  "automatic_coefficient_adjustment": false,
+  "interpretation": "Global averaged gradient vectors, before clipping/Adam; not update fractions."
+}

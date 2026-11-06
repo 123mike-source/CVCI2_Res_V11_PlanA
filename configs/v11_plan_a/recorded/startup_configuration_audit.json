@@ -1,0 +1,130 @@
+{
+  "status": "PASS",
+  "checked_at_utc": "2026-11-05T14:53:57.512607+00:00",
+  "architecture_version": 11,
+  "depth": 11,
+  "initialization": "geobev_pretraining_cvci2_planner_fresh_v8_res_v1",
+  "resume": null,
+  "epochs": 10,
+  "steps_per_epoch": 587,
+  "total_updates": 5870,
+  "warmup_updates": 500,
+  "world_trainable_parameters": 907712,
+  "batch_per_gpu": 12,
+  "global_batch": 48,
+  "position_loss_weight": 0.00095,
+  "position_probe_interval": 100,
+  "target_ratio": 0.2,
+  "optimizer_groups": [
+    {
+      "name": "image_backbone_decay",
+      "peak_lr": 5e-06,
+      "weight_decay": 0.0001
+    },
+    {
+      "name": "image_backbone_no_decay",
+      "peak_lr": 5e-06,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "pretrained_other_decay",
+      "peak_lr": 1e-05,
+      "weight_decay": 0.0001
+    },
+    {
+      "name": "pretrained_other_no_decay",
+      "peak_lr": 1e-05,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "pretrained_planner_decay",
+      "peak_lr": 2e-05,
+      "weight_decay": 0.0001
+    },
+    {
+      "name": "pretrained_planner_no_decay",
+      "peak_lr": 2e-05,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "new_future_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.01
+    },
+    {
+      "name": "new_future_no_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "new_offset_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.01
+    },
+    {
+      "name": "new_offset_no_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "new_bev_bridge_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.01
+    },
+    {
+      "name": "new_bev_bridge_no_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "geobev_depth_heads_no_decay",
+      "peak_lr": 1e-05,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "world_tuned_decay",
+      "peak_lr": 1e-06,
+      "weight_decay": 0.0001
+    },
+    {
+      "name": "world_tuned_no_decay",
+      "peak_lr": 1e-06,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "new_current_readout_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.01
+    },
+    {
+      "name": "new_current_readout_no_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "interaction_gate_body_no_decay",
+      "peak_lr": 0.0001,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "interaction_gate_output_no_decay",
+      "peak_lr": 0.001,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "control_future_gate",
+      "peak_lr": 0.001,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "control_future_distance",
+      "peak_lr": 0.01,
+      "weight_decay": 0.0
+    },
+    {
+      "name": "control_current_points",
+      "peak_lr": 0.001,
+      "weight_decay": 0.0
+    }
+  ]
+}

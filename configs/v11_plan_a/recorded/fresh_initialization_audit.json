@@ -1,0 +1,25 @@
+{
+  "status": "PASS",
+  "profile": "geobev_pretraining_cvci2_planner_fresh_v8_res_v1",
+  "seed": 2026,
+  "retained_cvci2_tensors_verified": 333,
+  "discarded_cvci2_prefixes": [
+    "backbone.",
+    "bev_down.",
+    "dense_proj."
+  ],
+  "geobev": {
+    "status": "PASS",
+    "source": "/mnt/workspace/nix3sgh/Models/geobev-r50-nuimage-cbgs.pth",
+    "sha256": "d7076e95611b2057ee1612e2e7b896c88a5c703374e6c1935d4f54786ffa19cb",
+    "verified_tensors": 558,
+    "discarded": "CenterHead only"
+  },
+  "original_irwm_tensors_verified": 1002,
+  "world_trainable_parameters": 907712,
+  "fresh_res_state_sha256": "a0c023c0fcdd89439b2bd94c2ad5084e44a626cbfda18e8198ed01625bdb0a71",
+  "optimizer_restored": false,
+  "scheduler_restored": false,
+  "prior_res_checkpoint_loaded": false,
+  "lidar_feature_input": false
+}

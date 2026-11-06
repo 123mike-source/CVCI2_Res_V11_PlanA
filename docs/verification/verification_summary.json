@@ -1,0 +1,38 @@
+{
+  "status": "PASS",
+  "formal_training_started": false,
+  "calibration_raw_estimate": 0.0009547287065549134,
+  "initial_coefficient": 0.00095,
+  "target_ratio": 0.2,
+  "reference_band": [
+    0.1,
+    0.3
+  ],
+  "automatic_coefficient_adjustment": false,
+  "probe_interval_production": 100,
+  "production_batch_per_gpu": 12,
+  "world_size": 4,
+  "smoke_updates": 12,
+  "probes": 7,
+  "global_ratio_at_full_coefficient": [
+    0.13952961854070633,
+    0.13343962039113294,
+    0.4275047197009866,
+    0.2599655723290987,
+    0.22704328531884874,
+    0.5785209505020023,
+    0.19374294688691232
+  ],
+  "effective_weighted_ratio": [
+    0.0002790592370814127,
+    0.0005337584815645318,
+    0.0034200377576078926,
+    0.003119586867949185,
+    0.00363269256510158,
+    0.011570419010040045,
+    0.004649830725285896
+  ],
+  "exact_resume_ranks": 4,
+  "gradient_probe_does_not_change_training_gradients": true,
+  "position_loss_formulation": "final_self_t99_fixed_prefix_weights_continuous_valid_v2"
+}

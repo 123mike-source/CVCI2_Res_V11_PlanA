@@ -1,0 +1,10 @@
+GeoBEV network blocks are derived from mengtan00/GeoBEV:
+https://github.com/mengtan00/GeoBEV
+Source revision: c2e55dc479caff6224f07c74b49aae1e63957b48
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+Original copyrights: OpenMMLab and Phigent Robotics.
+
+The isolated blocks omit registry decorators and adapt checkpoint call spelling
+and BF16 interpolation for the installed Torch 2.0 environment. The integration
+adds geometry and temporal data contracts, planner adapters, masked auxiliary
+losses, and versioned training/evaluation checkpoint dispatch.

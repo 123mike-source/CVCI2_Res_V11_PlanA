@@ -1,0 +1,203 @@
+{
+  "evaluation_protocol": "geobev_full_coverage_scoring_fallback_v1",
+  "split": "val",
+  "annotation_file": "/mnt/workspace/dataSet/nuscene/nuscenes_infos_val.pkl",
+  "annotation_sha256": "91b69afa4a17e5ba68a270a79d3673bb49edb2ce3f5efd3691f593788453ff7b",
+  "adapter_checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_10.pth",
+  "adapter_sha256": "f9d42f4ee4b2b1fc66c25ea12e65516d1575ba29f031329389bc6afcbe489b8f",
+  "adapter_epoch": 10,
+  "architecture_version": 11,
+  "seed": 2026,
+  "ddim_indices": [
+    99
+  ],
+  "ddim_steps": 1,
+  "noise_sha256": "334c41f7dd01a5f3afae130a7a4c42b4902969feef058ff873e52b24f8972e37",
+  "warmup_noise_seed": 1002029,
+  "warmup_noise_sha256": "437779d6d6faa385880e3fbcd31476c633f6a003a07eb9a6b259cccadb11ad15",
+  "selection_rule": "score only all_six_future_labels_valid; E2E iff history_length<3",
+  "evaluation_scope": "all annotated validation frames; exclude incomplete future labels",
+  "fallback": "same_checkpoint_geobev_dit_without_future_world_condition",
+  "fallback_updates_rolling_state": false,
+  "branch_selection_uses_gt": false,
+  "cold_start_frames": 3,
+  "continuity_seconds": [
+    0.4,
+    0.6
+  ],
+  "world_readout_steps": 5,
+  "metric_frame": "lidar",
+  "metric_filter": "all_six_future_points_valid",
+  "missing_labels": "discard_entire_trajectory_if_any_future_point_invalid",
+  "main_metric": "prefix_mean_at_1_2_3s_then_mean_over_horizons_same_as_original",
+  "expected_seen_frames": 6019,
+  "expected_original_planning_frames": 5456,
+  "expected_original_complete_samples": 4585,
+  "world_size": 4,
+  "partial": false,
+  "reference_dir": null,
+  "layer_diagnostics": true,
+  "script_sha256": "fcb5bdf7b2fcb52e52f898f776affc5c9f19855da9015ebdf98558751d957b50",
+  "original_evaluator_sha256": "88f3b967c162f2dc6f0d3f4dc9b8f9005904fd20760b43d36ed6e918beaa3223",
+  "backend": {
+    "cudnn_benchmark": false,
+    "cudnn_deterministic": true,
+    "tf32": true
+  },
+  "seen_frames": 6019,
+  "scored_frames": 5119,
+  "complete_samples": 5119,
+  "rolling_frames": 4585,
+  "fallback_frames": 534,
+  "original_planning_frames": 5456,
+  "discarded_incomplete_future_frames": 900,
+  "full_six_valid": {
+    "frames": 5119,
+    "frames_with_any_label": 5119,
+    "prefix_l2_m": [
+      0.14889486179830116,
+      0.3029738538482395,
+      0.5566906359853317
+    ],
+    "avg_L2_m": 0.3361864505439575,
+    "prefix_valid_frames": [
+      5119,
+      5119,
+      5119
+    ],
+    "endpoint_l2_m": [
+      0.19823697061203288,
+      0.5673724723646254,
+      1.2588987431268244
+    ],
+    "avg_endpoint_L2_m": 0.6748360620344943,
+    "endpoint_valid_frames": [
+      5119,
+      5119,
+      5119
+    ],
+    "point_valid_counts": [
+      5119,
+      5119,
+      5119,
+      5119,
+      5119,
+      5119
+    ]
+  },
+  "full_six_valid_ego": {
+    "frames": 5119,
+    "frames_with_any_label": 5119,
+    "prefix_l2_m": [
+      0.14880824660761754,
+      0.30280755618527383,
+      0.5563957752568544
+    ],
+    "avg_L2_m": 0.3360038593499152,
+    "prefix_valid_frames": [
+      5119,
+      5119,
+      5119
+    ],
+    "endpoint_l2_m": [
+      0.1981234744013306,
+      0.5670706828037811,
+      1.2582478199116751
+    ],
+    "avg_endpoint_L2_m": 0.6744806590389288,
+    "endpoint_valid_frames": [
+      5119,
+      5119,
+      5119
+    ],
+    "point_valid_counts": [
+      5119,
+      5119,
+      5119,
+      5119,
+      5119,
+      5119
+    ]
+  },
+  "retained_original_subset": {
+    "frames": 4585,
+    "frames_with_any_label": 4585,
+    "prefix_l2_m": [
+      0.1479023657346467,
+      0.30182042758017436,
+      0.5547255312793622
+    ],
+    "avg_L2_m": 0.3348161081980611,
+    "prefix_valid_frames": [
+      4585,
+      4585,
+      4585
+    ],
+    "endpoint_l2_m": [
+      0.19752129084097259,
+      0.5656978860022673,
+      1.2544322635941898
+    ],
+    "avg_endpoint_L2_m": 0.6725504801458099,
+    "endpoint_valid_frames": [
+      4585,
+      4585,
+      4585
+    ],
+    "point_valid_counts": [
+      4585,
+      4585,
+      4585,
+      4585,
+      4585,
+      4585
+    ]
+  },
+  "fallback_subset": {
+    "frames": 534,
+    "frames_with_any_label": 534,
+    "prefix_l2_m": [
+      0.1574165742549599,
+      0.3128773359438925,
+      0.5735633046686089
+    ],
+    "avg_L2_m": 0.3479524049558204,
+    "prefix_valid_frames": [
+      534,
+      534,
+      534
+    ],
+    "endpoint_l2_m": [
+      0.20438189898340262,
+      0.5817507092024754,
+      1.2972485720727607
+    ],
+    "avg_endpoint_L2_m": 0.6944603934195462,
+    "endpoint_valid_frames": [
+      534,
+      534,
+      534
+    ],
+    "point_valid_counts": [
+      534,
+      534,
+      534,
+      534,
+      534,
+      534
+    ]
+  },
+  "reference_preservation_audit": null,
+  "sample_coverage_check": "PASS",
+  "elapsed_seconds": 549.9211343640927,
+  "avg_L2_m": 0.3361864505439575,
+  "prefix_l2": [
+    0.14889486179830116,
+    0.3029738538482395,
+    0.5566906359853317
+  ],
+  "L2@1s_m": 0.14889486179830116,
+  "L2@2s_m": 0.3029738538482395,
+  "L2@3s_m": 0.5566906359853317,
+  "layer_diagnostics_file": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/validation/epoch_10/layer_diagnostics.json"
+}

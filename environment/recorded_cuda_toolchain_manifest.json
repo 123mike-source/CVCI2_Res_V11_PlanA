@@ -1,0 +1,74 @@
+[
+  {
+    "name": "cuda-cccl",
+    "version": "11.8.89",
+    "file": "cuda-cccl-11.8.89-0.tar.bz2",
+    "size": 1232088,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/cuda-cccl-11.8.89-0.tar.bz2"
+  },
+  {
+    "name": "cuda-cudart",
+    "version": "11.8.89",
+    "file": "cuda-cudart-11.8.89-0.tar.bz2",
+    "size": 201959,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/cuda-cudart-11.8.89-0.tar.bz2"
+  },
+  {
+    "name": "cuda-cudart-dev",
+    "version": "11.8.89",
+    "file": "cuda-cudart-dev-11.8.89-0.tar.bz2",
+    "size": 1137073,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/cuda-cudart-dev-11.8.89-0.tar.bz2"
+  },
+  {
+    "name": "cuda-driver-dev",
+    "version": "11.8.89",
+    "file": "cuda-driver-dev-11.8.89-0.tar.bz2",
+    "size": 16277,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/cuda-driver-dev-11.8.89-0.tar.bz2"
+  },
+  {
+    "name": "cuda-nvcc",
+    "version": "11.8.89",
+    "file": "cuda-nvcc-11.8.89-0.tar.bz2",
+    "size": 53254905,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/cuda-nvcc-11.8.89-0.tar.bz2"
+  },
+  {
+    "name": "cuda-nvrtc-dev",
+    "version": "11.8.89",
+    "file": "cuda-nvrtc-dev-11.8.89-0.tar.bz2",
+    "size": 17858592,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/cuda-nvrtc-dev-11.8.89-0.tar.bz2"
+  },
+  {
+    "name": "libcublas-dev",
+    "version": "11.11.3.6",
+    "file": "libcublas-dev-11.11.3.6-0.tar.bz2",
+    "size": 413253930,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/libcublas-dev-11.11.3.6-0.tar.bz2"
+  },
+  {
+    "name": "libcusolver-dev",
+    "version": "11.4.1.48",
+    "file": "libcusolver-dev-11.4.1.48-0.tar.bz2",
+    "size": 69542891,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/libcusolver-dev-11.4.1.48-0.tar.bz2"
+  },
+  {
+    "name": "libcusparse-dev",
+    "version": "11.7.5.86",
+    "file": "libcusparse-dev-11.7.5.86-0.tar.bz2",
+    "size": 377165256,
+    "sha256": null,
+    "url": "https://conda.anaconda.org/nvidia/label/cuda-11.8.0/linux-64/libcusparse-dev-11.7.5.86-0.tar.bz2"
+  }
+]

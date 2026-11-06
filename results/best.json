@@ -1,0 +1,6 @@
+{
+  "epoch": 10,
+  "checkpoint": "/mnt/workspace/nix3sgh/CVCI2_Res/experiments/h20_v11_plan_a_fresh10_20261105_01/run/epoch_10.pth",
+  "rolling_4585_L2_m": 0.3348161081980611,
+  "full_valid_5119_L2_m": 0.3361864505439575
+}
